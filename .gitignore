@@ -1,0 +1,25 @@
+# Local installation state, logs and machine-specific captures
+*.install.json
+*.log
+*.jsonl
+*.csv
+*.lnk
+*.bak
+*.original.ps1
+*.pre-*.ps1
+
+# Local-only configuration and credentials
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+
+# Editors, OS files and task artifacts
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+work/
+outputs/
