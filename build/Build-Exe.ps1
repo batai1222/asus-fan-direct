@@ -27,6 +27,22 @@ $compilerArguments = @(
 & $compiler @compilerArguments
 if ($LASTEXITCODE -ne 0) { throw "C# compilation failed: $LASTEXITCODE" }
 
+# Load assembly bytes only; do not invoke its entry point or touch real hardware.
+$assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($exe))
+foreach ($entry in @(
+    @{Name='AsusFanDirect.ps1'; Path=$source},
+    @{Name='Test-FanController.ps1'; Path=$test}
+)) {
+    $resource = $assembly.GetManifestResourceStream($entry.Name)
+    if ($null -eq $resource) { throw "Missing EXE resource: $($entry.Name)" }
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { $embeddedHash = [BitConverter]::ToString($sha256.ComputeHash($resource)).Replace('-','') }
+    finally { $sha256.Dispose(); $resource.Dispose() }
+    $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.Path).Hash
+    if ($embeddedHash -ne $sourceHash) { throw "Embedded resource mismatch: $($entry.Name)" }
+    Write-Output "Verified embedded $($entry.Name): $embeddedHash"
+}
+
 $runId = [Guid]::NewGuid().ToString('N')
 $stdout = Join-Path $OutputDirectory ".selftest-$runId.out"
 $stderr = Join-Path $OutputDirectory ".selftest-$runId.err"
@@ -41,7 +57,7 @@ try {
     $exitCode = $process.ExitCode
     $result = Get-Content -Raw -LiteralPath $stdout
     $errors = Get-Content -Raw -LiteralPath $stderr
-    if ($exitCode -ne 0 -or $result -notmatch 'PASS: 54 assertions' -or $result -notmatch 'PASS: embedded controller') {
+    if ($exitCode -ne 0 -or $result -notmatch 'PASS: 33 assertions; no hardware writes\.' -or $result -notmatch 'PASS: embedded controller, Windows PowerShell host, and GUI dependencies\.') {
         throw "EXE self-test failed ($exitCode): $result $errors"
     }
     Write-Output $result.Trim()

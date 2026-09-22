@@ -1,171 +1,101 @@
-param([string]$SourceText)
-$ErrorActionPreference = 'Stop'
-if (-not $PSBoundParameters.ContainsKey('SourceText')) {
-    $SourceText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\AsusFanDirect.ps1'))
+param([string]$SourceText,[string]$SourcePath)
+$ErrorActionPreference='Stop'
+if(-not $SourceText){
+    if(-not $SourcePath){
+        $SourcePath=Join-Path $PSScriptRoot 'AsusFanDirect.ThreeMode.ps1'
+        if(-not (Test-Path -LiteralPath $SourcePath)){$SourcePath=Join-Path (Split-Path $PSScriptRoot -Parent) 'AsusFanDirect.ps1'}
+    }
+    $SourceText=[IO.File]::ReadAllText($SourcePath)
 }
-$tokens = $null; $errors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseInput($SourceText,[ref]$tokens,[ref]$errors)
-if ($errors.Count) { throw ($errors | Out-String) }
+$tokens=$null; $parseErrors=$null
+$ast=[Management.Automation.Language.Parser]::ParseInput($SourceText,[ref]$tokens,[ref]$parseErrors)
+if($parseErrors.Count){throw ($parseErrors|Out-String)}
 . ([scriptblock]::Create($SourceText)) -LibraryOnly
-$script:checks = 0
-function Assert($Condition,[string]$Message) {
-    if (-not $Condition) { throw "FAIL: $Message" }
-    $script:checks++
+function Invoke-CimMethod {throw 'Forbidden unmocked hardware access in self-test.'}
+function Get-CimInstance {throw 'Forbidden unmocked hardware access in self-test.'}
+$script:Checks=0
+$script:Calls=New-Object 'System.Collections.Generic.List[string]'
+$script:Reject=''
+function Assert($Condition,[string]$Message){if(-not $Condition){throw "FAIL: $Message"}; $script:Checks++}
+function Send-AsusCommand([uint32]$Device,[uint32]$Value){
+    $command=('{0:X8}={1}' -f $Device,$Value); $script:Calls.Add($command)
+    if($command -eq $script:Reject){throw 'simulated command rejection'}
 }
-$script:calls = New-Object System.Collections.Generic.List[string]
-$script:failAt = ''
-function Send-FanModeFast([string]$Name) {
-    $script:calls.Add($Name)
-    if ($Name -eq $script:failAt) { throw 'simulated firmware rejection' }
-    return 1
+function Start-Sleep {param([int]$Milliseconds)}
+function Reset-Control {
+    $script:Calls.Clear(); $script:Reject=''
+    $script:Control=[pscustomobject]@{Mode=$null;Applied=$false;LastKeepUtc=[datetime]::MinValue;RetryAtUtc=[datetime]::MinValue;Failures=0;LastError='';ReleasePending=$false}
 }
-function Start-Sleep { param([int]$Milliseconds) }
-function Get-FanState { [pscustomobject]@{ModeValue=1;CPURPM=2000;GPURPM=2000} }
-$r = Set-FanMode Full
-Assert (($script:calls -join ',') -eq 'Standard,High,Full') 'Full performs the exact ordered transition'
-Assert ($r.SetResult -eq 1) 'successful write result is preserved'
-foreach($failedMode in @('Standard','High','Full')) {
-    $script:calls.Clear(); $script:failAt=$failedMode; $thrown=$false
-    try { [void](Invoke-FullSpeedReset) } catch { $thrown=$true }
-    Assert $thrown "error is reported for $failedMode"
-    Assert ($script:calls[$script:calls.Count-1] -eq 'Full') "Full is the final attempted mode after $failedMode failure"
-}
-$script:failAt=''
-foreach($otherMode in @('High','Quiet')) {
-    $script:calls.Clear(); [void](Set-FanMode $otherMode)
-    Assert (($script:calls -join ',') -eq $otherMode) "$otherMode never performs a full-speed reset"
-}
-$now=[datetime]::UtcNow
-$state=[pscustomobject]@{ModeValue=3;CPURPM=6300;GPURPM=6300}
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-30) 1 $now) -eq 'Ready') 'both fans ready: no more writes'
-$state.GPURPM=5600
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-5) 1 $now) -eq 'Waiting') 'normal spin-up is not interrupted'
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-21) 1 $now) -eq 'Waiting') 'slow but normal spin-up gets a full 30 seconds'
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-31) 1 $now) -eq 'Recover') 'GPU stuck at 5600 triggers recovery'
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-31) 3 $now) -eq 'Limited') 'recovery has a hard attempt limit'
-$state.CPURPM=5600; $state.GPURPM=6300
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-31) 1 $now) -eq 'Recover') 'CPU stuck at 5600 also triggers recovery'
-$state.CPURPM=$null
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-21) 1 $now) -eq 'Unreadable') 'unknown speed never triggers blind cycling'
-$state.CPURPM=6300; $state.ModeValue=2
-Assert ((Get-FullSpeedAction $state $now.AddSeconds(-31) 1 $now) -eq 'Recover') 'a wrong profile is not considered success'
-Assert ((Convert-FanStatusToRpm 65599) -eq 6300) 'raw fan speed is decoded correctly'
-Assert ($null -eq (Convert-FanStatusToRpm ([uint32]4294967294))) 'unsupported sensor is unknown'
-# Exercise the actual GUI auto-close function without loading a window or WMI.
-$autoCloseAst=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Update-AutoCloseState'},$true)[0]
-. ([scriptblock]::Create($autoCloseAst.Extent.Text))
-$script:RequestedMode='Full'
-$script:TargetStableSinceUtc=[datetime]::UtcNow.AddSeconds(-61)
-$form=[pscustomobject]@{Closed=$false}
-$form | Add-Member ScriptMethod Close {$this.Closed=$true}
-$state=[pscustomobject]@{ModeValue=3;CPURPM=5600;GPURPM=6300}
-Update-AutoCloseState $state
-Assert (-not $form.Closed -and $null -eq $script:TargetStableSinceUtc) 'GPU alone cannot auto-close with a slow CPU'
-$state.CPURPM=6300
-Update-AutoCloseState $state
-Assert ($null -ne $script:TargetStableSinceUtc) '6300 starts stability timer'
-$script:TargetStableSinceUtc=[datetime]::UtcNow.AddSeconds(-61)
+Reset-Control
+Set-RequestedFanMode RPM7000
+Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=2,00110019=3,00110013=1,00110014=1') '7000 initializes both AUTO then profile and native max'
+Assert ($script:Control.Mode -eq 'RPM7000' -and $script:Control.Applied) '7000 requested state retained'
+$state=[pscustomobject]@{ModeValue=3;CPURPM=6900;GPURPM=6300}
+$now=[datetime]::UtcNow.AddSeconds(2)
+$script:Calls.Clear(); Update-FanControl $state $now
+Assert (($script:Calls -join ',') -eq '00110013=1,00110014=1') 'GPU6300 keeps CPU full without whole-profile cycling'
+$script:Calls.Clear(); $state.GPURPM=5000; $state.CPURPM=6000
+Update-FanControl $state $now.AddSeconds(2)
+Assert (($script:Calls -join ',') -eq '00110013=1,00110014=1') 'low RPM only reasserts native max, never drops into normal/high'
+$script:Calls.Clear(); Update-FanControl $state $now.AddSeconds(2.1)
+Assert ($script:Calls.Count -eq 0) 'keepalive interval limits writes'
+$script:Calls.Clear(); $state.ModeValue=1
+Update-FanControl $state $now.AddSeconds(4)
+Assert (($script:Calls -join ',') -eq '00110019=3,00110013=1,00110014=1') 'foreign profile changes recover directly to full'
+$script:Calls.Clear(); Update-FanControl $null $now.AddSeconds(6)
+Assert (($script:Calls -join ',') -eq '00110013=1,00110014=1') 'lost telemetry does not stop selected max or blindly cycle profiles'
+$script:Calls.Clear(); Set-RequestedFanMode Quiet
+Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=1,00110013=0,00110014=0') 'Quiet releases native max and uses Normal reset without Performance'
+Assert ($script:Control.Mode -eq 'Quiet' -and -not $script:Control.ReleasePending) 'Quiet cancels old max keepalive'
+$script:Calls.Clear(); $state.ModeValue=1
+Update-FanControl $state $now.AddSeconds(10)
+Assert ($script:Calls.Count -eq 0) 'Quiet has no stale max writes or repeated resets at high RPM'
+Reset-Control; Set-RequestedFanMode RPM6300
+Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=2,00110019=3') '6300 releases native max and uses classic method'
+$state.ModeValue=3; $script:Calls.Clear()
+Update-FanControl $state ([datetime]::UtcNow.AddSeconds(2))
+Assert ($script:Calls.Count -eq 0) '6300 never applies native max during hold'
+Reset-Control; $script:Reject='00110013=0'; $thrown=$false
+try{Set-NativeFans 0}catch{$thrown=$true}
+Assert $thrown 'CPU release rejection is surfaced'
+Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0') 'GPU release still attempted after CPU failure'
+Reset-Control; $script:Reject='00110019=1'; $thrown=$false
+try{Invoke-QuietCommands}catch{$thrown=$true}
+Assert $thrown 'Quiet profile failure is surfaced'
+Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=1,00110013=0,00110014=0') 'both fan releases attempted despite Quiet profile failure'
+Reset-Control; $script:Reject='00110014=1'; $thrown=$false
+try{Set-RequestedFanMode RPM7000}catch{$thrown=$true}
+Assert $thrown 'partial max failure is reported'
+Assert (($script:Calls | Select-Object -Last 3) -join ',' -eq '00110019=1,00110013=0,00110014=0') 'partial max failure returns to Quiet and releases both'
+Assert ($script:Control.Mode -eq 'Quiet' -and -not $script:Control.ReleasePending) 'failed request cannot continue native keepalive'
+Reset-Control; $script:Reject='00110013=0'
+try{Set-RequestedFanMode Quiet}catch{}
+Assert ($script:Control.Mode -eq 'Quiet' -and $script:Control.ReleasePending) 'failed release remains pending even when profile is Quiet'
+$script:Reject=''; $script:Calls.Clear()
+Update-FanControl $state ([datetime]::UtcNow.AddSeconds(3))
+Assert (-not $script:Control.ReleasePending -and $script:Control.Applied) 'pending release recovers on a later tick'
+Reset-Control; $script:Reject='00110013=0'
+try{Set-RequestedFanMode Quiet}catch{}
+1..5 | ForEach-Object {Update-FanControl $state ([datetime]::UtcNow.AddSeconds(3*$_))}
+$script:Calls.Clear(); Update-FanControl $state ([datetime]::UtcNow.AddSeconds(30))
+Assert ($script:Calls.Count -eq 0 -and $script:Control.ReleasePending) 'persistent release failures are bounded and remain visible'
+Reset-Control; Set-RequestedFanMode RPM7000; $script:Reject='00110013=1'
+1..3 | ForEach-Object {Update-FanControl $state ([datetime]::UtcNow.AddSeconds(3*$_))}
+Assert ($script:Control.Mode -eq 'Quiet' -and -not $script:Control.ReleasePending) 'three keepalive failures release native control and stop full'
+Reset-Control; $state.ModeValue=3; $state.CPURPM=6900; $state.GPURPM=6300
+Assert (Test-ModeReached RPM7000 $state) 'GPU6300 satisfies the practical max target'
 $state.GPURPM=6200
-Update-AutoCloseState $state
-Assert $form.Closed '6200 fluctuation preserves the original stable-close behavior'
-# Transient telemetry errors must not cancel a successfully applied request.
-$readerAst=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Read-AndUpdateFanState'},$true)[0]
-. ([scriptblock]::Create($readerAst.Extent.Text))
-$noteLabel=[pscustomobject]@{Text=''}
-function Update-Labels($State) { $script:LastState=$State }
-function Get-FanState { throw 'simulated sensor timeout' }
-$script:RequestedMode='Full'; $script:FullAttempts=1
-$ok=Read-AndUpdateFanState
-Assert (-not $ok -and $null -eq $script:LastState) 'failed telemetry invalidates stale RPM'
-Assert ($script:RequestedMode -eq 'Full' -and $script:FullAttempts -eq 1) 'transient telemetry error preserves recovery request'
-function Get-FanState { [pscustomobject]@{ModeValue=3;CPURPM=6300;GPURPM=6300} }
-Assert (Read-AndUpdateFanState) 'telemetry resumes on the next read'
-# Invoke the real GUI handler with lightweight controls and mocked firmware.
-$applyAst=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Apply-RequestedMode'},$true)[0]
-. ([scriptblock]::Create($applyAst.Extent.Text))
-$modeLabel=[pscustomobject]@{Text=''}
-$textSetting='Setting'; $textTitle='Test'
-$form | Add-Member ScriptMethod Refresh {} -Force
-$script:IsBusy=$false
-$script:calls.Clear()
-Apply-RequestedMode Full
-Assert (($script:calls -join ',') -eq 'Standard,High,Full') 'the GUI Full handler executes the verified sequence'
-Assert ($script:RequestedMode -eq 'Full' -and $script:FullAttempts -eq 1 -and -not $script:IsBusy) 'GUI request and recovery count are initialized'
-$script:IsBusy=$true; $script:calls.Clear()
-Apply-RequestedMode Full
-Assert ($script:calls.Count -eq 0) 'a repeated click cannot interleave an active transition'
-$script:IsBusy=$false
-<# Quiet deceleration behavior, using the real transition helpers and GUI events. #>
-$high=[pscustomobject]@{ModeValue=3;CPURPM=6300;GPURPM=6200}
-$low=[pscustomobject]@{ModeValue=2;CPURPM=2000;GPURPM=2300}
-$script:calls.Clear()
-Start-QuietTransition $high
-Assert ($script:QuietBridgePending -and ($script:calls -join ',') -eq 'High') 'Quiet starts one non-blocking High bridge from high RPM'
-$now=[datetime]::UtcNow
-Assert ((Get-QuietSpeedAction $high $true $now.AddSeconds(-11) 0 $now) -eq 'Waiting') 'bridge waits while both fans are still high'
-Assert ((Get-QuietSpeedAction $low $true $now.AddSeconds(-5) 0 $now) -eq 'FinishBridge') 'bridge ends as soon as both fans are low'
-$oneSlow=[pscustomobject]@{ModeValue=2;CPURPM=2000;GPURPM=3000}
-Assert ((Get-QuietSpeedAction $oneSlow $true $now.AddSeconds(-5) 0 $now) -eq 'Waiting') 'one low fan cannot end the bridge early'
-Assert ((Get-QuietSpeedAction $null $true $now.AddSeconds(-13) 0 $now) -eq 'FinishBridge') '12-second deadline applies even without sensor data'
-Complete-QuietTransition
-Complete-QuietTransition
-Assert ((($script:calls -join ',') -eq 'High,Quiet') -and -not $script:QuietBridgePending) 'bridge completion is exactly once'
-$script:calls.Clear(); Start-QuietTransition $low
-Assert (($script:calls -join ',') -eq 'Quiet' -and -not $script:QuietBridgePending) 'already-low fans go directly to Quiet'
-foreach($speed in @(2000,4900,6300)) {
-    $quietState=[pscustomobject]@{ModeValue=1;CPURPM=$speed;GPURPM=$speed}
-    Assert ((Get-QuietSpeedAction $quietState $false $now.AddSeconds(-60) 1 $now) -eq 'Ready') "Quiet at $speed RPM never causes periodic rewriting"
-}
-Assert ((Get-QuietSpeedAction $high $false $now.AddSeconds(-4) 1 $now) -eq 'Waiting') 'wrong mode gets a reapply grace interval'
-Assert ((Get-QuietSpeedAction $high $false $now.AddSeconds(-6) 1 $now) -eq 'Reapply') 'an overwritten quiet mode is reapplied'
-Assert ((Get-QuietSpeedAction $high $false $now.AddSeconds(-6) 3 $now) -eq 'Limited') 'overwritten quiet mode has a hard retry limit'
-# GUI: selecting a newer mode cancels any delayed Quiet.
-$script:calls.Clear(); Apply-RequestedMode Quiet
-Assert ($script:QuietBridgePending -and ($script:calls -join ',') -eq 'High') 'GUI Quiet begins the same bridge'
-$bridgeDeadline=$script:LastApplyUtc
-Apply-RequestedMode Quiet
-Assert (($script:calls.Count -eq 1) -and $script:LastApplyUtc -eq $bridgeDeadline) 'repeated Quiet click does not restart or delay the bridge'
-Apply-RequestedMode Full
-Complete-QuietTransition
-Assert (($script:calls -join ',') -eq 'High,Standard,High,Full' -and -not $script:QuietBridgePending) 'new Full selection cannot be overwritten by a delayed Quiet'
-$script:calls.Clear(); Apply-RequestedMode Quiet; Apply-RequestedMode High; Complete-QuietTransition
-Assert (($script:calls -join ',') -eq 'High,High' -and -not $script:QuietBridgePending) 'new High selection cancels the quiet bridge'
-# Invoke the actual timer callback with sensor failure at the bridge deadline.
-$tickAst=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'Add_Tick'},$true)[0]
-$tick=$tickAst.Arguments[0].ScriptBlock.GetScriptBlock()
-$script:RequestedMode='Quiet'; $script:QuietBridgePending=$true
-$script:LastApplyUtc=[datetime]::UtcNow.AddSeconds(-13)
-$script:calls.Clear()
-function Get-FanState { throw 'simulated sensor timeout' }
-& $tick
-Assert (($script:calls -join ',') -eq 'Quiet' -and -not $script:QuietBridgePending) 'GUI deadline completes despite failed telemetry'
-& $tick
-Assert ($script:calls.Count -eq 1) 'failed telemetry cannot repeat the final Quiet command'
-# Final write failure is consumed, visible, and never retried on every tick.
-$script:RequestedMode='Quiet'; $script:QuietBridgePending=$true
-$script:LastApplyUtc=[datetime]::UtcNow.AddSeconds(-13)
-$script:failAt='Quiet'; $script:calls.Clear()
-& $tick
-Assert (-not $script:QuietBridgePending -and $null -eq $script:RequestedMode -and $noteLabel.Text -like '*rejection*') 'Quiet write failure stops control and surfaces its error'
-& $tick
-Assert ($script:calls.Count -eq 1) 'a failed Quiet write is not retried indefinitely'
-$script:failAt=''
-# Closing an unfinished bridge finalizes Quiet; closing another mode does not.
-$closingAst=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'Add_FormClosing'},$true)[0]
-$closing=$closingAst.Arguments[0].ScriptBlock.GetScriptBlock()
-$script:QuietBridgePending=$true; $script:calls.Clear()
-$cancel=[pscustomobject]@{Cancel=$false}
-& $closing $form $cancel
-& $closing $form $cancel
-Assert (($script:calls -join ',') -eq 'Quiet' -and -not $cancel.Cancel) 'closing finalizes a pending quiet bridge only once'
-$script:QuietBridgePending=$true; $script:RequestedMode='Quiet'; $script:failAt='Quiet'
-& $closing $form $cancel
-Assert ($cancel.Cancel -and -not $script:QuietBridgePending -and $null -eq $script:RequestedMode) 'failed close-time Quiet keeps the error visible'
-$script:failAt=''
-# Quiet/High auto-close requires the requested profile, not just matching RPM.
-$targetAst=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-TargetReached'},$true)[0]
-. ([scriptblock]::Create($targetAst.Extent.Text))
-Assert (-not (Test-TargetReached Quiet $low)) 'low RPM in High is not completed Quiet'
-$low.ModeValue=1
-Assert (Test-TargetReached Quiet $low) 'low RPM in Quiet is completed Quiet'
-"PASS: $script:checks assertions; PowerShell $($PSVersionTable.PSVersion); no hardware writes."
+Assert (-not (Test-ModeReached RPM7000 $state)) 'GPU6200 is not mislabeled as at least6300'
+$state.ModeValue=1; $state.CPURPM=6300; $state.GPURPM=6300
+Assert (-not (Test-ModeReached Quiet $state)) 'Quiet mode readback alone cannot claim low RPM'
+$state.CPURPM=2000; $state.GPURPM=2400
+Assert (Test-ModeReached Quiet $state) 'Quiet reached requires both fans low'
+$script:Control.ReleasePending=$true
+Assert (-not (Test-ModeReached Quiet $state)) 'pending release cannot be shown as successful'
+Assert ($null -eq (Convert-FanRpm ([uint32]::MaxValue-1))) 'unsupported fan telemetry is unknown'
+Assert ((Convert-FanRpm 65605) -eq 6900) 'fan RPM decoding preserves measured values'
+Assert ($SourceText -notmatch 'AutoCloseStableSeconds|TargetStableSinceUtc') 'no timed automatic process exit can drop keepalive'
+Assert ($SourceText -match 'UserClosing.*\{\$_\.Cancel=\$true; \$form.Hide\(\)\}') 'window close keeps tray process alive'
+Assert ($SourceText -match "'Quiet','RPM6300','RPM7000'") 'three requested modes are exposed'
+"PASS: $script:Checks assertions; no hardware writes."
+if($SourceText){'PASS: embedded controller compatible self-test'}
