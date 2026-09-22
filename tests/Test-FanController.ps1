@@ -1,9 +1,12 @@
+param([string]$SourceText)
 $ErrorActionPreference = 'Stop'
-$source = Join-Path $PSScriptRoot '..\AsusFanDirect.ps1'
+if (-not $PSBoundParameters.ContainsKey('SourceText')) {
+    $SourceText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\AsusFanDirect.ps1'))
+}
 $tokens = $null; $errors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($SourceText,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-. $source -LibraryOnly
+. ([scriptblock]::Create($SourceText)) -LibraryOnly
 $script:checks = 0
 function Assert($Condition,[string]$Message) {
     if (-not $Condition) { throw "FAIL: $Message" }
