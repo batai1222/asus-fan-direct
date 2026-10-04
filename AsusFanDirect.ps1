@@ -5,7 +5,7 @@
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-$ControllerVersion='2026.10.04.1'
+$ControllerVersion='2026.10.04.2'
 $DeviceIds=@{Profile=[uint32]0x00110019;CPU=[uint32]0x00110013;GPU=[uint32]0x00110014}
 $script:Wmi=$null
 $script:ShowWindowEvent=$null
@@ -58,6 +58,9 @@ function Set-GpuSaioFull {
 function Get-AsusWmi {
     if($null -eq $script:Wmi){$script:Wmi=Get-CimInstance -Namespace 'root\WMI' -ClassName AsusAtkWmi_WMNB -OperationTimeoutSec 2}
     return $script:Wmi
+}
+function Test-ControllerFileVersion([string]$FileVersion) {
+    try{return ([version]$FileVersion) -eq ([version]$ControllerVersion)}catch{return $false}
 }
 function Send-AsusCommand([uint32]$Device,[uint32]$Value) {
     $r=Invoke-CimMethod -InputObject (Get-AsusWmi) -MethodName DEVS -Arguments @{Device_ID=$Device;Control_status=$Value} -OperationTimeoutSec 2
@@ -390,7 +393,7 @@ $owns=$false
 try {
     try{$owns=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException] {$owns=$true}
     if(-not $owns){
-        $older=@(Get-Process -Name AsusFanDirect -ErrorAction SilentlyContinue|Where-Object {$_.Id -ne $PID -and $_.Path -and ([Diagnostics.FileVersionInfo]::GetVersionInfo($_.Path)).FileVersion -ne '2026.10.4.1'})
+        $older=@(Get-Process -Name AsusFanDirect -ErrorAction SilentlyContinue|Where-Object {$_.Id -ne $PID -and $_.Path -and -not (Test-ControllerFileVersion ([Diagnostics.FileVersionInfo]::GetVersionInfo($_.Path)).FileVersion)})
         if($older.Count){throw '请先在旧风扇程序中点击退出程序，再打开桌面新版。'}
         try{
             $signal=[Threading.EventWaitHandle]::OpenExisting('Local\AsusFanDirect.ShowWindow')

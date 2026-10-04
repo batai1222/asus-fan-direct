@@ -17,14 +17,17 @@ $source = Join-Path $repoRoot 'AsusFanDirect.ps1'
 $test = Join-Path $repoRoot 'tests\Test-FanController.ps1'
 $worker = Join-Path $repoRoot 'GpuSaioWorker.ps1'
 $installer = Join-Path $repoRoot 'Install.ps1'
+$bootstrapTest = Join-Path $repoRoot 'tests\Test-Bootstrap.ps1'
+$icon = Join-Path $repoRoot 'assets\fan.ico'
 $version = [regex]::Match([IO.File]::ReadAllText($source), "ControllerVersion='([^']+)'").Groups[1].Value
 if (-not $version) { throw 'Controller version missing.' }
-foreach ($scriptPath in @($source, $test, $worker, $installer)) {
+foreach ($scriptPath in @($source, $test, $worker, $installer, $bootstrapTest)) {
     $tokens=$null; $parseErrors=$null
     [void][Management.Automation.Language.Parser]::ParseFile($scriptPath,[ref]$tokens,[ref]$parseErrors)
     if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 }
 & $test -SourceText ([IO.File]::ReadAllText($source))
+& $bootstrapTest -InstallerText ([IO.File]::ReadAllText($installer))
 $sma = [System.Management.Automation.PowerShell].Assembly.Location
 $compilerArguments = @(
     '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
@@ -33,6 +36,10 @@ $compilerArguments = @(
     "/win32icon:$(Join-Path $repoRoot 'assets\fan.ico')",
     "/resource:$source,AsusFanDirect.ps1",
     "/resource:$test,Test-FanController.ps1",
+    "/resource:$worker,GpuSaioWorker.ps1",
+    "/resource:$installer,Install.ps1",
+    "/resource:$bootstrapTest,Test-Bootstrap.ps1",
+    "/resource:$icon,fan.ico",
     (Join-Path $repoRoot 'launcher\Program.cs')
 )
 & $compiler @compilerArguments
@@ -42,7 +49,11 @@ if ($LASTEXITCODE -ne 0) { throw "C# compilation failed: $LASTEXITCODE" }
 $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($exe))
 foreach ($entry in @(
     @{Name='AsusFanDirect.ps1'; Path=$source},
-    @{Name='Test-FanController.ps1'; Path=$test}
+    @{Name='Test-FanController.ps1'; Path=$test},
+    @{Name='GpuSaioWorker.ps1'; Path=$worker},
+    @{Name='Install.ps1'; Path=$installer},
+    @{Name='Test-Bootstrap.ps1'; Path=$bootstrapTest},
+    @{Name='fan.ico'; Path=$icon}
 )) {
     $resource = $assembly.GetManifestResourceStream($entry.Name)
     if ($null -eq $resource) { throw "Missing EXE resource: $($entry.Name)" }
@@ -68,7 +79,7 @@ try {
     $exitCode = $process.ExitCode
     $result = Get-Content -Raw -LiteralPath $stdout
     $errors = Get-Content -Raw -LiteralPath $stderr
-    if ($exitCode -ne 0 -or $result -notmatch 'PASS: 44 offline integration assertions; no hardware writes\.' -or $result -notmatch 'PASS: embedded controller, Windows PowerShell host, and GUI dependencies\.') {
+    if ($exitCode -ne 0 -or $result -notmatch 'PASS: 46 offline integration assertions; no hardware writes\.' -or $result -notmatch 'PASS: 28 bootstrap assertions; no installation or hardware writes\.' -or $result -notmatch 'PASS: embedded controller, Windows PowerShell host, and GUI dependencies\.') {
         throw "EXE self-test failed ($exitCode): $result $errors"
     }
     Write-Output $result.Trim()

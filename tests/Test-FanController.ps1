@@ -13,6 +13,8 @@ function Set-GpuSaioFull {if($null -ne $script:GpuSwitchProfile){$script:FakeSta
 function Stop-GpuSaioFull {$script:Calls.Add('GPU:AUTO')}
 $script:Assertions=0
 function Assert-Case([bool]$Condition,[string]$Name){if(-not $Condition){throw $Name};$script:Assertions++}
+Assert-Case (Test-ControllerFileVersion ([version]$ControllerVersion).ToString()) 'Same release can reopen the existing window'
+Assert-Case (-not (Test-ControllerFileVersion '2026.10.4.1')) 'Previous release is identified as an upgrade'
 Set-RequestedFanMode RPM7000
 Assert-Case ($script:Control.Mode -eq 'RPM7000') 'Full mode retained'
 Assert-Case ($script:Calls.Contains('GPU:MAX')) 'GPU100 used'
