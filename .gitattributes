@@ -1,0 +1,4 @@
+# Keep the verified PowerShell and launcher script bytes unchanged in Git blobs.
+*.ps1 -text
+*.cmd -text
+*.ico binary

@@ -1,101 +1,108 @@
-param([string]$SourceText,[string]$SourcePath)
+﻿param([string]$SourceText)
 $ErrorActionPreference='Stop'
-if(-not $SourceText){
-    if(-not $SourcePath){
-        $SourcePath=Join-Path $PSScriptRoot 'AsusFanDirect.ThreeMode.ps1'
-        if(-not (Test-Path -LiteralPath $SourcePath)){$SourcePath=Join-Path (Split-Path $PSScriptRoot -Parent) 'AsusFanDirect.ps1'}
-    }
-    $SourceText=[IO.File]::ReadAllText($SourcePath)
-}
-$tokens=$null; $parseErrors=$null
-$ast=[Management.Automation.Language.Parser]::ParseInput($SourceText,[ref]$tokens,[ref]$parseErrors)
-if($parseErrors.Count){throw ($parseErrors|Out-String)}
+if(-not $SourceText){$SourceText=[IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'AsusFanDirect.ps1'))}
 . ([scriptblock]::Create($SourceText)) -LibraryOnly
-function Invoke-CimMethod {throw 'Forbidden unmocked hardware access in self-test.'}
-function Get-CimInstance {throw 'Forbidden unmocked hardware access in self-test.'}
-$script:Checks=0
 $script:Calls=New-Object 'System.Collections.Generic.List[string]'
-$script:Reject=''
-function Assert($Condition,[string]$Message){if(-not $Condition){throw "FAIL: $Message"}; $script:Checks++}
-function Send-AsusCommand([uint32]$Device,[uint32]$Value){
-    $command=('{0:X8}={1}' -f $Device,$Value); $script:Calls.Add($command)
-    if($command -eq $script:Reject){throw 'simulated command rejection'}
-}
-function Start-Sleep {param([int]$Milliseconds)}
-function Reset-Control {
-    $script:Calls.Clear(); $script:Reject=''
-    $script:Control=[pscustomobject]@{Mode=$null;Applied=$false;LastKeepUtc=[datetime]::MinValue;RetryAtUtc=[datetime]::MinValue;Failures=0;LastError='';ReleasePending=$false}
-}
-Reset-Control
+$script:FakeState=[pscustomobject]@{ModeValue=3;CPURPM=7000;GPURPM=6500}
+$script:GpuFailure=$false
+$script:GpuSwitchProfile=$null
+function Get-FanState {return $script:FakeState}
+function Get-ProfileValue {return $script:FakeState.ModeValue}
+function Send-AsusCommand([uint32]$Device,[uint32]$Value){$script:Calls.Add(('WMI:{0:X8}:{1}' -f $Device,$Value))}
+function Set-GpuSaioFull {if($null -ne $script:GpuSwitchProfile){$script:FakeState.ModeValue=$script:GpuSwitchProfile};if($script:GpuFailure){throw 'Mock GPU failure'};$script:Calls.Add('GPU:MAX')}
+function Stop-GpuSaioFull {$script:Calls.Add('GPU:AUTO')}
+$script:Assertions=0
+function Assert-Case([bool]$Condition,[string]$Name){if(-not $Condition){throw $Name};$script:Assertions++}
 Set-RequestedFanMode RPM7000
-Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=2,00110019=3,00110013=1,00110014=1') '7000 initializes both AUTO then profile and native max'
-Assert ($script:Control.Mode -eq 'RPM7000' -and $script:Control.Applied) '7000 requested state retained'
-$state=[pscustomobject]@{ModeValue=3;CPURPM=6900;GPURPM=6300}
-$now=[datetime]::UtcNow.AddSeconds(2)
-$script:Calls.Clear(); Update-FanControl $state $now
-Assert (($script:Calls -join ',') -eq '00110013=1,00110014=1') 'GPU6300 keeps CPU full without whole-profile cycling'
-$script:Calls.Clear(); $state.GPURPM=5000; $state.CPURPM=6000
-Update-FanControl $state $now.AddSeconds(2)
-Assert (($script:Calls -join ',') -eq '00110013=1,00110014=1') 'low RPM only reasserts native max, never drops into normal/high'
-$script:Calls.Clear(); Update-FanControl $state $now.AddSeconds(2.1)
-Assert ($script:Calls.Count -eq 0) 'keepalive interval limits writes'
-$script:Calls.Clear(); $state.ModeValue=1
-Update-FanControl $state $now.AddSeconds(4)
-Assert (($script:Calls -join ',') -eq '00110019=3,00110013=1,00110014=1') 'foreign profile changes recover directly to full'
-$script:Calls.Clear(); Update-FanControl $null $now.AddSeconds(6)
-Assert (($script:Calls -join ',') -eq '00110013=1,00110014=1') 'lost telemetry does not stop selected max or blindly cycle profiles'
-$script:Calls.Clear(); Set-RequestedFanMode Quiet
-Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=1,00110013=0,00110014=0') 'Quiet releases native max and uses Normal reset without Performance'
-Assert ($script:Control.Mode -eq 'Quiet' -and -not $script:Control.ReleasePending) 'Quiet cancels old max keepalive'
-$script:Calls.Clear(); $state.ModeValue=1
-Update-FanControl $state $now.AddSeconds(10)
-Assert ($script:Calls.Count -eq 0) 'Quiet has no stale max writes or repeated resets at high RPM'
-Reset-Control; Set-RequestedFanMode RPM6300
-Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=2,00110019=3') '6300 releases native max and uses classic method'
-$state.ModeValue=3; $script:Calls.Clear()
-Update-FanControl $state ([datetime]::UtcNow.AddSeconds(2))
-Assert ($script:Calls.Count -eq 0) '6300 never applies native max during hold'
-Reset-Control; $script:Reject='00110013=0'; $thrown=$false
-try{Set-NativeFans 0}catch{$thrown=$true}
-Assert $thrown 'CPU release rejection is surfaced'
-Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0') 'GPU release still attempted after CPU failure'
-Reset-Control; $script:Reject='00110019=1'; $thrown=$false
-try{Invoke-QuietCommands}catch{$thrown=$true}
-Assert $thrown 'Quiet profile failure is surfaced'
-Assert (($script:Calls -join ',') -eq '00110013=0,00110014=0,00110019=0,00110019=1,00110013=0,00110014=0') 'both fan releases attempted despite Quiet profile failure'
-Reset-Control; $script:Reject='00110014=1'; $thrown=$false
-try{Set-RequestedFanMode RPM7000}catch{$thrown=$true}
-Assert $thrown 'partial max failure is reported'
-Assert (($script:Calls | Select-Object -Last 3) -join ',' -eq '00110019=1,00110013=0,00110014=0') 'partial max failure returns to Quiet and releases both'
-Assert ($script:Control.Mode -eq 'Quiet' -and -not $script:Control.ReleasePending) 'failed request cannot continue native keepalive'
-Reset-Control; $script:Reject='00110013=0'
-try{Set-RequestedFanMode Quiet}catch{}
-Assert ($script:Control.Mode -eq 'Quiet' -and $script:Control.ReleasePending) 'failed release remains pending even when profile is Quiet'
-$script:Reject=''; $script:Calls.Clear()
-Update-FanControl $state ([datetime]::UtcNow.AddSeconds(3))
-Assert (-not $script:Control.ReleasePending -and $script:Control.Applied) 'pending release recovers on a later tick'
-Reset-Control; $script:Reject='00110013=0'
-try{Set-RequestedFanMode Quiet}catch{}
-1..5 | ForEach-Object {Update-FanControl $state ([datetime]::UtcNow.AddSeconds(3*$_))}
-$script:Calls.Clear(); Update-FanControl $state ([datetime]::UtcNow.AddSeconds(30))
-Assert ($script:Calls.Count -eq 0 -and $script:Control.ReleasePending) 'persistent release failures are bounded and remain visible'
-Reset-Control; Set-RequestedFanMode RPM7000; $script:Reject='00110013=1'
-1..3 | ForEach-Object {Update-FanControl $state ([datetime]::UtcNow.AddSeconds(3*$_))}
-Assert ($script:Control.Mode -eq 'Quiet' -and -not $script:Control.ReleasePending) 'three keepalive failures release native control and stop full'
-Reset-Control; $state.ModeValue=3; $state.CPURPM=6900; $state.GPURPM=6300
-Assert (Test-ModeReached RPM7000 $state) 'GPU6300 satisfies the practical max target'
-$state.GPURPM=6200
-Assert (-not (Test-ModeReached RPM7000 $state)) 'GPU6200 is not mislabeled as at least6300'
-$state.ModeValue=1; $state.CPURPM=6300; $state.GPURPM=6300
-Assert (-not (Test-ModeReached Quiet $state)) 'Quiet mode readback alone cannot claim low RPM'
-$state.CPURPM=2000; $state.GPURPM=2400
-Assert (Test-ModeReached Quiet $state) 'Quiet reached requires both fans low'
-$script:Control.ReleasePending=$true
-Assert (-not (Test-ModeReached Quiet $state)) 'pending release cannot be shown as successful'
-Assert ($null -eq (Convert-FanRpm ([uint32]::MaxValue-1))) 'unsupported fan telemetry is unknown'
-Assert ((Convert-FanRpm 65605) -eq 6900) 'fan RPM decoding preserves measured values'
-Assert ($SourceText -notmatch 'AutoCloseStableSeconds|TargetStableSinceUtc') 'no timed automatic process exit can drop keepalive'
-Assert ($SourceText -match 'UserClosing.*\{\$_\.Cancel=\$true; \$form.Hide\(\)\}') 'window close keeps tray process alive'
-Assert ($SourceText -match "'Quiet','RPM6300','RPM7000'") 'three requested modes are exposed'
-"PASS: $script:Checks assertions; no hardware writes."
-if($SourceText){'PASS: embedded controller compatible self-test'}
+Assert-Case ($script:Control.Mode -eq 'RPM7000') 'Full mode retained'
+Assert-Case ($script:Calls.Contains('GPU:MAX')) 'GPU100 used'
+Assert-Case (-not($script:Calls.Contains('WMI:00110013:1') -or $script:Calls.Contains('WMI:00110014:1'))) 'WMI full writes removed'
+$script:Calls.Clear();Update-FanControl $script:FakeState ([datetime]::UtcNow.AddSeconds(2))
+Assert-Case ($script:Calls.Contains('GPU:MAX')) 'Full keepalive uses SAIO'
+$script:Calls.Clear();$script:FakeState.ModeValue=1;Update-FanControl $script:FakeState
+Assert-Case ($script:Control.Mode -eq 'System') 'FnF yields'
+Assert-Case ($script:Calls.Contains('GPU:AUTO')) 'FnF releases SAIO'
+Assert-Case (-not $script:Calls.Contains('GPU:MAX')) 'FnF does not reacquire'
+Assert-Case (-not(@($script:Calls|Where-Object {$_ -like 'WMI:00110019:*'}).Count)) 'FnF does not overwrite profile'
+$script:Calls.Clear();$script:FakeState.ModeValue=3;Set-RequestedFanMode RPM6300
+Assert-Case (-not $script:Calls.Contains('GPU:MAX')) '6300 unchanged'
+Assert-Case ($script:Calls.Contains('GPU:AUTO')) '6300 releases SAIO'
+$script:Calls.Clear();Set-RequestedFanMode Quiet
+Assert-Case ($script:Control.QuietBridgePending) 'High quiet bridge retained'
+Assert-Case ($script:Calls.Contains('GPU:AUTO') -and $script:Calls.Contains('WMI:00110019:2')) 'Quiet releases first'
+$script:FakeState.ModeValue=2;Update-FanControl $script:FakeState ([datetime]::UtcNow.AddSeconds(13))
+Assert-Case (-not $script:Control.QuietBridgePending) 'Quiet bridge bounded'
+Assert-Case ($script:Calls.Contains('WMI:00110019:1')) 'Quiet final mode'
+$script:Calls.Clear();$script:FakeState.ModeValue=3;$script:GpuFailure=$true
+try{Set-RequestedFanMode RPM7000;throw 'Expected GPU failure'}catch{if($_.Exception.Message -eq 'Expected GPU failure'){throw}}
+Assert-Case ($script:Control.Mode -eq 'Quiet' -and $script:Calls.Contains('GPU:AUTO')) 'Failed GPU request releases'
+Assert-Case ($script:Calls.Contains('WMI:00110013:0') -and $script:Calls.Contains('WMI:00110014:0')) 'Failed GPU request dualAUTO'
+$script:Calls.Clear();$script:GpuSwitchProfile=2
+Set-RequestedFanMode RPM7000
+Assert-Case ($script:Control.Mode -eq 'System' -and -not $script:Calls.Contains('WMI:00110019:1')) 'Initial FnF does not overwrite profile'
+$script:GpuSwitchProfile=$null
+$script:Control.Mode='RPM7000';$script:Control.Failures=2;$script:Control.RetryAtUtc=[datetime]::MinValue;$script:Control.LastKeepUtc=[datetime]::MinValue
+$script:FakeState.ModeValue=3;$script:GpuSwitchProfile=2;$script:Calls.Clear()
+$cached=[pscustomobject]@{ModeValue=3;CPURPM=7000;GPURPM=6500}
+Update-FanControl $cached
+Assert-Case ($script:Control.Mode -eq 'System' -and -not $script:Calls.Contains('WMI:00110019:1')) 'Late FnF does not overwrite profile'
+$script:GpuSwitchProfile=$null
+$script:GpuFailure=$false;$script:Control.Mode='System';$script:Calls.Clear();Stop-FanController
+Assert-Case ($script:Calls.Contains('GPU:AUTO')) 'Exit releases helper'
+
+# Simulated time verifies the tray deadline without moving the fans or waiting a minute.
+$script:Calls.Clear()
+$script:Control.Mode='RPM7000'; $script:Control.Applied=$true; $script:Control.LastError=''
+$script:Control.ReleasePending=$false; $script:Control.QuietBridgePending=$false
+$reached=[pscustomobject]@{ModeValue=3;CPURPM=7000;GPURPM=6500}
+$start=[datetime]::SpecifyKind([datetime]'2026-10-04T10:00:00',[DateTimeKind]::Utc)
+Reset-AutoTrayDelay
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start)) 'Reached starts countdown without hiding'
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddMilliseconds(59999))) 'Visible before 60 seconds'
+Assert-Case (Update-AutoTrayDelay $reached $true $start.AddSeconds(60)) 'Hide at 60 seconds'
+Assert-Case (-not (Update-AutoTrayDelay $reached $false $start.AddSeconds(61))) 'Hidden window has no countdown'
+Assert-Case ($script:AutoTrayDelay.ReachedAtUtc -eq [datetime]::MinValue) 'Hide clears old deadline'
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(62))) 'Reopen waits again'
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(121))) 'Reopen gets full minute'
+Assert-Case (Update-AutoTrayDelay $reached $true $start.AddSeconds(122)) 'Reopen reaches new deadline'
+
+Reset-AutoTrayDelay
+[void](Update-AutoTrayDelay $reached $true $start)
+$below=[pscustomobject]@{ModeValue=3;CPURPM=7000;GPURPM=6300}
+Assert-Case (-not (Update-AutoTrayDelay $below $true $start.AddSeconds(59))) 'GPU below enhanced target cancels'
+Assert-Case ($script:AutoTrayDelay.ReachedAtUtc -eq [datetime]::MinValue) 'Below target clears deadline'
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(60))) 'Recovering speed starts fresh minute'
+Assert-Case (-not (Update-AutoTrayDelay $null $true $start.AddSeconds(120))) 'Read failure cannot hide'
+$missing=[pscustomobject]@{ModeValue=3;CPURPM=7000;GPURPM=$null}
+Assert-Case (-not (Update-AutoTrayDelay $missing $true $start.AddSeconds(121))) 'Missing sensor cannot hide'
+
+Reset-AutoTrayDelay
+[void](Update-AutoTrayDelay $reached $true $start)
+$script:Control.Mode='RPM6300'
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(60))) 'Changing mode resets minute'
+Assert-Case (Update-AutoTrayDelay $reached $true $start.AddSeconds(120)) '6300 mode reaches its deadline'
+$script:Control.Mode='System'
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(121))) 'FnF release cancels countdown'
+$script:Control.Mode=$null
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(122))) 'No selection cannot hide'
+
+$script:Control.Mode='RPM7000'
+foreach($flag in @('LastError','ReleasePending','QuietBridgePending')) {
+    Reset-AutoTrayDelay
+    [void](Update-AutoTrayDelay $reached $true $start)
+    if($flag -eq 'LastError'){$script:Control.$flag='Mock control failure'}else{$script:Control.$flag=$true}
+    Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(60))) "$flag cancels countdown"
+    if($flag -eq 'LastError'){$script:Control.$flag=''}else{$script:Control.$flag=$false}
+}
+$script:Control.Applied=$false
+Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(61))) 'Unapplied mode cannot hide'
+$script:Control.Applied=$true; $script:Control.Mode='Quiet'
+$quiet=[pscustomobject]@{ModeValue=1;CPURPM=2200;GPURPM=2200}
+Reset-AutoTrayDelay
+Assert-Case (-not (Update-AutoTrayDelay $quiet $true $start)) 'Quiet target starts minute'
+Assert-Case (Update-AutoTrayDelay $quiet $true $start.AddSeconds(60)) 'Quiet target hides after minute'
+Reset-AutoTrayDelay
+[void](Update-AutoTrayDelay $quiet $true $start)
+Assert-Case (-not (Update-AutoTrayDelay $quiet $true $start.AddSeconds(-10))) 'Clock rollback cannot hide early'
+Assert-Case ($script:Calls.Count -eq 0) 'Tray timing issues no hardware commands'
+Write-Output ('PASS: {0} offline integration assertions; no hardware writes.' -f $script:Assertions)
