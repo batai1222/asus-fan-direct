@@ -5,7 +5,7 @@
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-$ControllerVersion='2026.10.04.2'
+$ControllerVersion='2026.10.05.1'
 $DeviceIds=@{Profile=[uint32]0x00110019;CPU=[uint32]0x00110013;GPU=[uint32]0x00110014}
 $script:Wmi=$null
 $script:ShowWindowEvent=$null
@@ -245,11 +245,11 @@ function Update-FanControl($State,[datetime]$NowUtc=[datetime]::UtcNow) {
     }
 }
 function Test-ModeReached([string]$Name,$State) {
-    if($null -eq $State -or $null -eq $State.CPURPM -or $null -eq $State.GPURPM){return $false}
+    if($null -eq $State -or $null -eq $State.CPURPM){return $false}
     switch($Name) {
-        Quiet {return ($State.ModeValue -eq 1 -and $State.CPURPM -le 2500 -and $State.GPURPM -le 2500 -and -not $script:Control.ReleasePending -and -not $script:Control.QuietBridgePending)}
-        RPM6300 {return ($State.ModeValue -eq 3 -and $State.CPURPM -ge 6200 -and $State.GPURPM -ge 6300)}
-        RPM7000 {return ($State.ModeValue -eq 3 -and $State.CPURPM -ge 6900 -and $State.GPURPM -ge 6400)}
+        Quiet {return ($State.ModeValue -eq 1 -and $State.CPURPM -le 2500 -and -not $script:Control.ReleasePending -and -not $script:Control.QuietBridgePending)}
+        RPM6300 {return ($State.ModeValue -eq 3 -and $State.CPURPM -ge 6200)}
+        RPM7000 {return ($State.ModeValue -eq 3 -and $State.CPURPM -ge 6900)}
     }
     return $false
 }
@@ -333,7 +333,7 @@ function Show-FanGui {
         if(Update-AutoTrayDelay $state $form.Visible $now) {Hide-ControllerWindow}
         elseif($script:AutoTrayDelay.ReachedAtUtc -ne [datetime]::MinValue) {
             $remaining=[int][math]::Ceiling(60-($now-$script:AutoTrayDelay.ReachedAtUtc).TotalSeconds)
-            $note.Text="已达速，$remaining 秒后自动收起到托盘。"
+            $note.Text="CPU已达速，$remaining 秒后自动收起到托盘。"
         }
     }
     function Apply-UiMode([string]$Name) {

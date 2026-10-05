@@ -6,7 +6,7 @@
 
 三档为“高速后安静”“6300 转”“7000 / 6500 转”。H7600ZW 实测 CPU 约7000、GPU约6400–6500 RPM；未观察到 GPU7000，其他机型和负载未验证。
 
-达速连续一分钟后窗口收起，托盘保持调速；掉速或重新打开窗口重新计时。双击托盘图标恢复窗口，Fn+F切到系统档位时让出控制，“退出程序”恢复自动调速。
+CPU 达速连续一分钟后窗口收起，托盘保持调速；CPU掉速或重新打开窗口重新计时，GPU转速不影响倒计时。双击托盘图标恢复窗口，Fn+F切到系统档位时让出控制，“退出程序”恢复自动调速。
 
 ## 要求与后台
 
@@ -14,7 +14,7 @@ Windows x64、Windows PowerShell 5.1、.NET Framework 4.x，以及电脑已有�
 
 单文件EXE内置控制器、后台、安装器和图标。文件存放于受保护的 Program Files，SYSTEM 任务按需运行，没有开机启动项；目录权限和组件哈希核对一致时复用。升级不会强制关闭旧版。
 
-[完整 ZIP](https://github.com/batai1222/asus-fan-direct/releases/latest/download/AsusFanDirect-2026.10.04.2-win-x64.zip) 可用于手动安装：全部解压后以管理员身份运行 Install.cmd。
+[完整 ZIP](https://github.com/batai1222/asus-fan-direct/releases/latest/download/AsusFanDirect-2026.10.05.1-win-x64.zip) 可用于手动安装：全部解压后以管理员身份运行 Install.cmd。
 
 ## 构建与自测
 

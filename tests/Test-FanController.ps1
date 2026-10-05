@@ -70,13 +70,13 @@ Assert-Case (Update-AutoTrayDelay $reached $true $start.AddSeconds(122)) 'Reopen
 
 Reset-AutoTrayDelay
 [void](Update-AutoTrayDelay $reached $true $start)
-$below=[pscustomobject]@{ModeValue=3;CPURPM=7000;GPURPM=6300}
-Assert-Case (-not (Update-AutoTrayDelay $below $true $start.AddSeconds(59))) 'GPU below enhanced target cancels'
+$below=[pscustomobject]@{ModeValue=3;CPURPM=6800;GPURPM=6500}
+Assert-Case (-not (Update-AutoTrayDelay $below $true $start.AddSeconds(59))) 'CPU below enhanced target cancels'
 Assert-Case ($script:AutoTrayDelay.ReachedAtUtc -eq [datetime]::MinValue) 'Below target clears deadline'
 Assert-Case (-not (Update-AutoTrayDelay $reached $true $start.AddSeconds(60))) 'Recovering speed starts fresh minute'
 Assert-Case (-not (Update-AutoTrayDelay $null $true $start.AddSeconds(120))) 'Read failure cannot hide'
-$missing=[pscustomobject]@{ModeValue=3;CPURPM=7000;GPURPM=$null}
-Assert-Case (-not (Update-AutoTrayDelay $missing $true $start.AddSeconds(121))) 'Missing sensor cannot hide'
+$missing=[pscustomobject]@{ModeValue=3;CPURPM=$null;GPURPM=6500}
+Assert-Case (-not (Update-AutoTrayDelay $missing $true $start.AddSeconds(121))) 'Missing CPU sensor cannot hide'
 
 Reset-AutoTrayDelay
 [void](Update-AutoTrayDelay $reached $true $start)

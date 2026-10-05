@@ -13,8 +13,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("直接操作你的华硕ProArt风扇")]
 [assembly: AssemblyProduct("ASUS Fan Direct")]
 [assembly: AssemblyDescription("ASUS ProArt H7600ZW fan preset controller")]
-[assembly: AssemblyVersion("2026.10.4.2")]
-[assembly: AssemblyFileVersion("2026.10.4.2")]
+[assembly: AssemblyVersion("2026.10.5.1")]
+[assembly: AssemblyFileVersion("2026.10.5.1")]
 
 internal static class Program
 {
